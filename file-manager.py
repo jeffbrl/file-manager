@@ -12,6 +12,7 @@ import tarfile
 import bz2
 import gzip
 import lzma
+import urllib.parse
 from datetime import datetime
 
 try:
@@ -9244,6 +9245,28 @@ class FileExplorer(QMainWindow):
         self._tabs.setCurrentIndex(idx)
         pane.navigate_to(path if os.path.isdir(path) else HOME)
 
+    def open_archive(self, archive_path: str):
+        """Open or bring to front the ArchiveViewer for the given archive."""
+        pane = self._active()
+        if pane is not None:
+            pane._view_archive(archive_path)
+        else:
+            abs_p = os.path.abspath(archive_path)
+            viewer = _open_archive_viewers.get(abs_p)
+            if viewer is not None:
+                try:
+                    viewer.show()
+                    viewer.raise_()
+                    viewer.activateWindow()
+                    return
+                except RuntimeError:
+                    _open_archive_viewers.pop(abs_p, None)
+            viewer = ArchiveViewer(abs_p, default_dest=os.path.dirname(abs_p))
+            _open_archive_viewers[abs_p] = viewer
+            viewer.show()
+            viewer.raise_()
+            viewer.activateWindow()
+
     def _close_tab(self, index: int):
         if self._tabs.count() <= 1:
             return          # never close the last tab
@@ -9385,16 +9408,59 @@ class FileExplorer(QMainWindow):
         super().closeEvent(event)
 
 
+def _normalize_arg_path(arg: str) -> str:
+    """Normalize a path or file:// URI passed via CLI or desktop entry."""
+    if arg.startswith("file://"):
+        arg = urllib.parse.unquote(arg[7:])
+    return os.path.abspath(os.path.expanduser(arg))
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 def main():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     _apply_win11_palette(app)
     app.setStyleSheet(WIN11_LIGHT_QSS)
-    # Open the path passed as argument, fallback to HOME
-    start_path = sys.argv[1] if len(sys.argv) > 1 and os.path.isdir(sys.argv[1]) else HOME
+
+    targets = []
+    for arg in sys.argv[1:]:
+        if not arg or arg.startswith("-"):
+            continue
+        clean_p = _normalize_arg_path(arg)
+        if os.path.exists(clean_p):
+            targets.append(clean_p)
+
+    start_path = HOME
+    archives_to_open = []
+
+    if targets:
+        first = targets[0]
+        if os.path.isdir(first):
+            start_path = first
+        elif _is_decompressible_archive(first):
+            parent = os.path.dirname(first)
+            start_path = parent if os.path.isdir(parent) else HOME
+            archives_to_open.append(first)
+        else:
+            parent = os.path.dirname(first)
+            start_path = parent if os.path.isdir(parent) else HOME
+
+        for other in targets[1:]:
+            if _is_decompressible_archive(other):
+                archives_to_open.append(other)
+
     w = FileExplorer(start_path=start_path)
     w.show()
+
+    # Open any archives passed as arguments in ArchiveViewer
+    for arc in archives_to_open:
+        w.open_archive(arc)
+
+    # Open any additional directory arguments in new tabs
+    for other in targets[1:]:
+        if os.path.isdir(other) and other != start_path:
+            w.new_tab(other)
+
     sys.exit(app.exec())
 
 if __name__ == "__main__":

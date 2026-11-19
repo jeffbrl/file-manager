@@ -678,3 +678,79 @@ class TestUIComponents:
             assert not mock_question.called
             assert res == target_path
             assert os.path.exists(target_path)
+
+
+class TestCliAndFileAssociation:
+    def test_normalize_arg_path(self):
+        _normalize_arg_path = fm._normalize_arg_path
+        assert _normalize_arg_path("/tmp/test.zip") == "/tmp/test.zip"
+        assert _normalize_arg_path("file:///tmp/test.zip") == "/tmp/test.zip"
+        assert _normalize_arg_path("file:///tmp/my%20test%20archive.zip") == "/tmp/my test archive.zip"
+        assert _normalize_arg_path("~/test.zip") == os.path.expanduser("~/test.zip")
+
+    def test_open_archive_method(self, qapp, temp_dir):
+        zip_path = os.path.join(temp_dir, "cli_test.zip")
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("inside_cli.txt", "cli archive content")
+
+        w = fm.FileExplorer(start_path=temp_dir)
+        w.show()
+        qapp.processEvents()
+
+        w.open_archive(zip_path)
+        qapp.processEvents()
+
+        abs_p = os.path.abspath(zip_path)
+        assert abs_p in fm._open_archive_viewers
+        viewer = fm._open_archive_viewers[abs_p]
+        assert viewer.isVisible()
+        assert viewer._archive_path == abs_p
+        viewer.close()
+        w.close()
+
+    def test_cli_targets_archive_opens_parent_and_viewer(self, qapp, temp_dir):
+        subdir = os.path.join(temp_dir, "nested_folder")
+        os.makedirs(subdir, exist_ok=True)
+        zip_path = os.path.join(subdir, "target_archive.zip")
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("sample.txt", "sample text")
+
+        from unittest.mock import patch
+        with patch.object(sys, "argv", ["file-manager", zip_path]):
+            # Simulate main() logic
+            targets = []
+            for arg in sys.argv[1:]:
+                if not arg or arg.startswith("-"):
+                    continue
+                clean_p = fm._normalize_arg_path(arg)
+                if os.path.exists(clean_p):
+                    targets.append(clean_p)
+
+            start_path = fm.HOME
+            archives_to_open = []
+            if targets:
+                first = targets[0]
+                if os.path.isdir(first):
+                    start_path = first
+                elif _is_decompressible_archive(first):
+                    parent = os.path.dirname(first)
+                    start_path = parent if os.path.isdir(parent) else fm.HOME
+                    archives_to_open.append(first)
+
+            assert start_path == subdir
+            assert archives_to_open == [zip_path]
+
+            w = fm.FileExplorer(start_path=start_path)
+            w.show()
+            qapp.processEvents()
+            for arc in archives_to_open:
+                w.open_archive(arc)
+            qapp.processEvents()
+
+            abs_p = os.path.abspath(zip_path)
+            assert abs_p in fm._open_archive_viewers
+            viewer = fm._open_archive_viewers[abs_p]
+            assert viewer.isVisible()
+            viewer.close()
+            w.close()
+
