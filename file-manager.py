@@ -12,6 +12,7 @@ import tarfile
 import bz2
 import gzip
 import lzma
+import urllib.parse
 from datetime import datetime
 
 try:
@@ -5046,6 +5047,94 @@ class ArchiveViewerTree(QTreeWidget):
         drag.exec(Qt.DropAction.CopyAction)
 
 
+class DestinationFolderDialog(QDialog):
+    """Dialog allowing the user to select, browse, or type any destination folder.
+
+    If the folder path does not exist, it creates it automatically without prompting 'Are you sure?'.
+    """
+
+    def __init__(self, parent=None, caption: str = "Select Destination Folder", initial_dir: str = ""):
+        super().__init__(parent)
+        self.setWindowTitle(caption)
+        self.setMinimumWidth(520)
+        self.setModal(True)
+
+        self._init_path = os.path.abspath(os.path.expanduser(initial_dir)) if initial_dir else os.path.expanduser("~")
+        self._result_path = ""
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 20, 20, 20)
+        lay.setSpacing(12)
+
+        lbl = QLabel("Destination folder:")
+        lbl.setStyleSheet("font-size: 13px; font-weight: 600; color: palette(windowText);")
+        lay.addWidget(lbl)
+
+        path_box = QHBoxLayout()
+        path_box.setSpacing(8)
+
+        self._path_edit = QLineEdit(self._init_path)
+        self._path_edit.setStyleSheet("padding: 6px 10px; font-size: 12px;")
+        self._path_edit.returnPressed.connect(self._on_choose)
+        path_box.addWidget(self._path_edit, 1)
+
+        btn_browse = QPushButton("Browse…")
+        btn_browse.setStyleSheet("padding: 6px 14px; font-size: 12px;")
+        btn_browse.clicked.connect(self._on_browse)
+        path_box.addWidget(btn_browse)
+        lay.addLayout(path_box)
+
+        lay.addSpacing(6)
+
+        btn_box = QHBoxLayout()
+        btn_box.addStretch()
+
+        self._btn_choose = QPushButton("Choose")
+        self._btn_choose.setDefault(True)
+        self._btn_choose.setStyleSheet(
+            "QPushButton { background-color: #0078D4; color: #FFFFFF; font-weight: 600; padding: 6px 20px; border-radius: 4px; }"
+            "QPushButton:hover { background-color: #106EBE; }"
+            "QPushButton:pressed { background-color: #005A9E; }"
+        )
+        self._btn_choose.clicked.connect(self._on_choose)
+        btn_box.addWidget(self._btn_choose)
+
+        btn_cancel = QPushButton("Cancel")
+        btn_cancel.setStyleSheet("padding: 6px 16px; border-radius: 4px;")
+        btn_cancel.clicked.connect(self.reject)
+        btn_box.addWidget(btn_cancel)
+
+        lay.addLayout(btn_box)
+
+    def _on_browse(self):
+        curr = self._path_edit.text().strip()
+        launch = (curr if curr and os.path.exists(curr)
+                  else os.path.dirname(curr) if curr and os.path.exists(os.path.dirname(curr))
+                  else os.path.expanduser("~"))
+        chosen = QFileDialog.getExistingDirectory(self, "Browse for Folder", launch)
+        if chosen:
+            self._path_edit.setText(chosen)
+
+    def _on_choose(self):
+        text = self._path_edit.text().strip()
+        if not text:
+            return
+        if not os.path.isabs(text) and not text.startswith("~"):
+            base_dir = self._init_path if os.path.isdir(self._init_path) else os.path.dirname(self._init_path)
+            target = os.path.abspath(os.path.join(base_dir, text))
+        else:
+            target = os.path.abspath(os.path.expanduser(text))
+        try:
+            os.makedirs(target, exist_ok=True)
+        except Exception:
+            pass
+        self._result_path = target
+        self.accept()
+
+    def result_path(self) -> str:
+        return self._result_path
+
+
 def _choose_destination_directory(parent=None, caption: str = "Select Destination Folder",
                                   initial_dir: str = "") -> str:
     """Open a folder picker that allows choosing or creating a destination folder without prompting.
@@ -5053,75 +5142,9 @@ def _choose_destination_directory(parent=None, caption: str = "Select Destinatio
     If the user selects, types, or specifies a folder path that does not exist, it is created
     automatically without asking 'Are you sure?' or prompting for confirmation.
     """
-    start_dir = os.path.abspath(os.path.expanduser(initial_dir)) if initial_dir else os.path.expanduser("~")
-    if not os.path.exists(start_dir):
-        parent_candidate = os.path.dirname(start_dir)
-        while parent_candidate and not os.path.exists(parent_candidate):
-            parent_candidate = os.path.dirname(parent_candidate)
-        launch_dir = parent_candidate or os.path.expanduser("~")
-    else:
-        launch_dir = start_dir
-
-    dlg = QFileDialog(parent, caption, launch_dir)
-    dlg.setFileMode(QFileDialog.FileMode.Directory)
-    dlg.setOption(QFileDialog.Option.ShowDirsOnly, True)
-
-    if initial_dir:
-        base_name = os.path.basename(initial_dir.rstrip("/\\"))
-        if base_name:
-            dlg.selectFile(base_name)
-
-    chosen_result: list[str] = []
-
-    def _on_accept():
-        files = dlg.selectedFiles()
-        if files:
-            target = os.path.abspath(files[0])
-        else:
-            target = os.path.abspath(dlg.directory().absolutePath())
-        try:
-            os.makedirs(target, exist_ok=True)
-        except Exception:
-            pass
-        chosen_result.append(target)
-        dlg.done(QDialog.DialogCode.Accepted)
-
-    # Intercept Choose/Open button and line edit Enter to avoid Qt's "directory not found" prompt
-    for btn in dlg.findChildren(QPushButton):
-        txt = btn.text().lower()
-        if "choose" in txt or "open" in txt or "select" in txt:
-            try:
-                btn.clicked.disconnect()
-            except Exception:
-                pass
-            btn.clicked.connect(_on_accept)
-
-    for le in dlg.findChildren(QLineEdit):
-        try:
-            le.returnPressed.disconnect()
-        except Exception:
-            pass
-        le.returnPressed.connect(_on_accept)
-
+    dlg = DestinationFolderDialog(parent=parent, caption=caption, initial_dir=initial_dir)
     if dlg.exec() == QDialog.DialogCode.Accepted:
-        if chosen_result:
-            dest = chosen_result[0]
-        else:
-            files = dlg.selectedFiles()
-            dest = os.path.abspath(files[0]) if files else os.path.abspath(dlg.directory().absolutePath())
-        try:
-            os.makedirs(dest, exist_ok=True)
-        except Exception:
-            pass
-        return dest
-    elif chosen_result:
-        dest = chosen_result[0]
-        try:
-            os.makedirs(dest, exist_ok=True)
-        except Exception:
-            pass
-        return dest
-
+        return dlg.result_path()
     return ""
 
 
@@ -5350,12 +5373,23 @@ class ArchiveViewer(QWidget):
         worker = ExtractWorker([self._archive_path], dest, create_subfolders=False)
         prog = ExtractProgressDialog(os.path.basename(self._archive_path), dest, parent=self)
         worker.progress.connect(prog.update_progress)
-        worker.finished.connect(prog.on_finished)
+        prog.cancelled.connect(worker.cancel)
+        prog.rejected.connect(worker.cancel)
+
+        def _on_finished(success: bool, final_dest: str, errors: list):
+            prog.accept()
+            thread.quit()
+            if errors:
+                err_text = "\n".join(f"{os.path.basename(p)}: {msg}" for p, msg in errors)
+                QMessageBox.warning(self, "Extraction Error",
+                                    f"Encountered errors while extracting:\n{err_text}")
+            elif success:
+                self.close()
+
+        worker.finished.connect(_on_finished)
         thread = QThread()
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        prog.rejected.connect(worker.cancel)
-        worker.finished.connect(thread.quit)
         thread.start()
         prog.exec()
 
@@ -5375,12 +5409,23 @@ class ArchiveViewer(QWidget):
                                selected_members=members, strip_prefixes=True)
         prog = ExtractProgressDialog(os.path.basename(self._archive_path), dest, parent=self)
         worker.progress.connect(prog.update_progress)
-        worker.finished.connect(prog.on_finished)
+        prog.cancelled.connect(worker.cancel)
+        prog.rejected.connect(worker.cancel)
+
+        def _on_finished(success: bool, final_dest: str, errors: list):
+            prog.accept()
+            thread.quit()
+            if errors:
+                err_text = "\n".join(f"{os.path.basename(p)}: {msg}" for p, msg in errors)
+                QMessageBox.warning(self, "Extraction Error",
+                                    f"Encountered errors while extracting:\n{err_text}")
+            elif success:
+                self.close()
+
+        worker.finished.connect(_on_finished)
         thread = QThread()
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        prog.rejected.connect(worker.cancel)
-        worker.finished.connect(thread.quit)
         thread.start()
         prog.exec()
 
@@ -5517,7 +5562,10 @@ class ExtractDialog(QDialog):
 
     def _on_browse(self):
         curr = self._path_edit.text().strip()
-        chosen = _choose_destination_directory(self, "Select Destination Folder", curr or os.path.expanduser("~"))
+        launch = (curr if curr and os.path.exists(curr)
+                  else os.path.dirname(curr) if curr and os.path.exists(os.path.dirname(curr))
+                  else os.path.expanduser("~"))
+        chosen = QFileDialog.getExistingDirectory(self, "Select Destination Folder", launch)
         if chosen:
             self._path_edit.setText(chosen)
 
@@ -9244,6 +9292,28 @@ class FileExplorer(QMainWindow):
         self._tabs.setCurrentIndex(idx)
         pane.navigate_to(path if os.path.isdir(path) else HOME)
 
+    def open_archive(self, archive_path: str):
+        """Open or bring to front the ArchiveViewer for the given archive."""
+        pane = self._active()
+        if pane is not None:
+            pane._view_archive(archive_path)
+        else:
+            abs_p = os.path.abspath(archive_path)
+            viewer = _open_archive_viewers.get(abs_p)
+            if viewer is not None:
+                try:
+                    viewer.show()
+                    viewer.raise_()
+                    viewer.activateWindow()
+                    return
+                except RuntimeError:
+                    _open_archive_viewers.pop(abs_p, None)
+            viewer = ArchiveViewer(abs_p, default_dest=os.path.dirname(abs_p))
+            _open_archive_viewers[abs_p] = viewer
+            viewer.show()
+            viewer.raise_()
+            viewer.activateWindow()
+
     def _close_tab(self, index: int):
         if self._tabs.count() <= 1:
             return          # never close the last tab
@@ -9385,16 +9455,59 @@ class FileExplorer(QMainWindow):
         super().closeEvent(event)
 
 
+def _normalize_arg_path(arg: str) -> str:
+    """Normalize a path or file:// URI passed via CLI or desktop entry."""
+    if arg.startswith("file://"):
+        arg = urllib.parse.unquote(arg[7:])
+    return os.path.abspath(os.path.expanduser(arg))
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 def main():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     _apply_win11_palette(app)
     app.setStyleSheet(WIN11_LIGHT_QSS)
-    # Open the path passed as argument, fallback to HOME
-    start_path = sys.argv[1] if len(sys.argv) > 1 and os.path.isdir(sys.argv[1]) else HOME
+
+    targets = []
+    for arg in sys.argv[1:]:
+        if not arg or arg.startswith("-"):
+            continue
+        clean_p = _normalize_arg_path(arg)
+        if os.path.exists(clean_p):
+            targets.append(clean_p)
+
+    start_path = HOME
+    archives_to_open = []
+
+    if targets:
+        first = targets[0]
+        if os.path.isdir(first):
+            start_path = first
+        elif _is_decompressible_archive(first):
+            parent = os.path.dirname(first)
+            start_path = parent if os.path.isdir(parent) else HOME
+            archives_to_open.append(first)
+        else:
+            parent = os.path.dirname(first)
+            start_path = parent if os.path.isdir(parent) else HOME
+
+        for other in targets[1:]:
+            if _is_decompressible_archive(other):
+                archives_to_open.append(other)
+
     w = FileExplorer(start_path=start_path)
     w.show()
+
+    # Open any archives passed as arguments in ArchiveViewer
+    for arc in archives_to_open:
+        w.open_archive(arc)
+
+    # Open any additional directory arguments in new tabs
+    for other in targets[1:]:
+        if os.path.isdir(other) and other != start_path:
+            w.new_tab(other)
+
     sys.exit(app.exec())
 
 if __name__ == "__main__":

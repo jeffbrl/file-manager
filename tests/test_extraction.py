@@ -666,15 +666,155 @@ class TestUIComponents:
         assert open(extracted_file).read() == "auto created directory content"
 
     def test_choose_destination_directory_creates_folder(self, qapp, temp_dir):
-        from unittest.mock import patch
-        _choose_destination_directory = fm._choose_destination_directory
         target_path = os.path.join(temp_dir, "created_by_chooser")
         assert not os.path.exists(target_path)
 
-        with patch.object(fm.QFileDialog, "exec", return_value=fm.QDialog.DialogCode.Accepted), \
-             patch.object(fm.QFileDialog, "selectedFiles", return_value=[target_path]), \
-             patch.object(fm.QMessageBox, "question") as mock_question:
-            res = _choose_destination_directory(None, "Select Folder", target_path)
-            assert not mock_question.called
-            assert res == target_path
-            assert os.path.exists(target_path)
+        dlg = fm.DestinationFolderDialog(None, "Select Folder", temp_dir)
+        dlg._path_edit.setText(target_path)
+        dlg._on_choose()
+        assert dlg.result_path() == target_path
+        assert os.path.exists(target_path)
+
+        rel_target = "relative_new_folder"
+        expected_path = os.path.join(temp_dir, rel_target)
+        dlg2 = fm.DestinationFolderDialog(None, "Select Folder", temp_dir)
+        dlg2._path_edit.setText(rel_target)
+        dlg2._on_choose()
+        assert dlg2.result_path() == expected_path
+        assert os.path.exists(expected_path)
+
+    def test_archive_viewer_extract_all_creates_directory_and_extracts(self, qapp, temp_dir):
+        from unittest.mock import patch
+        zip_path = os.path.join(temp_dir, "viewer_test.zip")
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("inside_viewer.txt", "viewer archive content")
+
+        target_dir = os.path.join(temp_dir, "new_extract_target_dir")
+        assert not os.path.exists(target_dir)
+
+        viewer = ArchiveViewer(zip_path, default_dest=target_dir)
+        viewer.show()
+        qapp.processEvents()
+        assert viewer.isVisible()
+
+        def mock_dest_dialog_exec(dialog_self):
+            dialog_self._on_choose()
+            return fm.QDialog.DialogCode.Accepted
+
+        with patch.object(fm.DestinationFolderDialog, "exec", mock_dest_dialog_exec):
+            viewer._extract_all()
+            for _ in range(30):
+                qapp.processEvents()
+
+        assert os.path.exists(target_dir)
+        extracted = os.path.join(target_dir, "inside_viewer.txt")
+        assert os.path.exists(extracted)
+        assert open(extracted).read() == "viewer archive content"
+        assert not viewer.isVisible()
+
+    def test_archive_viewer_extract_selected_closes_window(self, qapp, temp_dir):
+        from unittest.mock import patch
+        zip_path = os.path.join(temp_dir, "viewer_sel_test.zip")
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("sel_file.txt", "selected file content")
+
+        target_dir = os.path.join(temp_dir, "sel_extract_target_dir")
+        viewer = ArchiveViewer(zip_path, default_dest=target_dir)
+        viewer.show()
+        qapp.processEvents()
+        assert viewer.isVisible()
+
+        # Select all items in tree
+        viewer._tree.selectAll()
+        assert len(viewer.selected_members()) > 0
+
+        def mock_dest_dialog_exec(dialog_self):
+            dialog_self._on_choose()
+            return fm.QDialog.DialogCode.Accepted
+
+        with patch.object(fm.DestinationFolderDialog, "exec", mock_dest_dialog_exec):
+            viewer._extract_selected_to()
+            for _ in range(30):
+                qapp.processEvents()
+
+        assert os.path.exists(target_dir)
+        extracted = os.path.join(target_dir, "sel_file.txt")
+        assert os.path.exists(extracted)
+        assert open(extracted).read() == "selected file content"
+        assert not viewer.isVisible()
+
+
+class TestCliAndFileAssociation:
+    def test_normalize_arg_path(self):
+        _normalize_arg_path = fm._normalize_arg_path
+        assert _normalize_arg_path("/tmp/test.zip") == "/tmp/test.zip"
+        assert _normalize_arg_path("file:///tmp/test.zip") == "/tmp/test.zip"
+        assert _normalize_arg_path("file:///tmp/my%20test%20archive.zip") == "/tmp/my test archive.zip"
+        assert _normalize_arg_path("~/test.zip") == os.path.expanduser("~/test.zip")
+
+    def test_open_archive_method(self, qapp, temp_dir):
+        zip_path = os.path.join(temp_dir, "cli_test.zip")
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("inside_cli.txt", "cli archive content")
+
+        w = fm.FileExplorer(start_path=temp_dir)
+        w.show()
+        qapp.processEvents()
+
+        w.open_archive(zip_path)
+        qapp.processEvents()
+
+        abs_p = os.path.abspath(zip_path)
+        assert abs_p in fm._open_archive_viewers
+        viewer = fm._open_archive_viewers[abs_p]
+        assert viewer.isVisible()
+        assert viewer._archive_path == abs_p
+        viewer.close()
+        w.close()
+
+    def test_cli_targets_archive_opens_parent_and_viewer(self, qapp, temp_dir):
+        subdir = os.path.join(temp_dir, "nested_folder")
+        os.makedirs(subdir, exist_ok=True)
+        zip_path = os.path.join(subdir, "target_archive.zip")
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("sample.txt", "sample text")
+
+        from unittest.mock import patch
+        with patch.object(sys, "argv", ["file-manager", zip_path]):
+            # Simulate main() logic
+            targets = []
+            for arg in sys.argv[1:]:
+                if not arg or arg.startswith("-"):
+                    continue
+                clean_p = fm._normalize_arg_path(arg)
+                if os.path.exists(clean_p):
+                    targets.append(clean_p)
+
+            start_path = fm.HOME
+            archives_to_open = []
+            if targets:
+                first = targets[0]
+                if os.path.isdir(first):
+                    start_path = first
+                elif _is_decompressible_archive(first):
+                    parent = os.path.dirname(first)
+                    start_path = parent if os.path.isdir(parent) else fm.HOME
+                    archives_to_open.append(first)
+
+            assert start_path == subdir
+            assert archives_to_open == [zip_path]
+
+            w = fm.FileExplorer(start_path=start_path)
+            w.show()
+            qapp.processEvents()
+            for arc in archives_to_open:
+                w.open_archive(arc)
+            qapp.processEvents()
+
+            abs_p = os.path.abspath(zip_path)
+            assert abs_p in fm._open_archive_viewers
+            viewer = fm._open_archive_viewers[abs_p]
+            assert viewer.isVisible()
+            viewer.close()
+            w.close()
+
